@@ -71,7 +71,8 @@
     const out = [];
     for (const a of el.attributes || []) {
       if (!attrNames.test(a.name) || !a.value) continue;
-      out.push({ name: a.name.toLowerCase(), valueKind: rawAttrs.has(a.name.toLowerCase()) ? 'structural' : 'hash', value: rawAttrs.has(a.name.toLowerCase()) ? a.value.toLowerCase() : await sha256(a.value.toLowerCase()) });
+      const name = a.name.toLowerCase();
+      out.push({ name, valueKind: rawAttrs.has(name) ? 'structural' : 'hash', value: rawAttrs.has(name) ? a.value.toLowerCase() : await sha256(a.value.toLowerCase()) });
     }
     return out;
   }
@@ -122,15 +123,39 @@
     const independent = INDEPENDENT.filter(k => parts[k].available && parts[k].score >= .65).length;
     return { element: el, totalScore: available ? total / available : 0, independent, parts };
   }
-  function roots() { const out = [document]; const seen = new Set(out); const walk = root => { for (const el of root.querySelectorAll('*')) if (el.shadowRoot && !seen.has(el.shadowRoot)) { seen.add(el.shadowRoot); out.push(el.shadowRoot); walk(el.shadowRoot); } }; walk(document); return out; }
-  function queryAll(selector) { const out = []; for (const root of roots()) { try { out.push(...root.querySelectorAll(selector)); } catch (_) {} } return out; }
+
+  const shadowRoots = new Set();
+  function collectShadowRoots() {
+    const roots = [document];
+    const visit = root => {
+      for (const el of root.querySelectorAll('*')) {
+        if (el.shadowRoot && !shadowRoots.has(el.shadowRoot)) {
+          shadowRoots.add(el.shadowRoot);
+          roots.push(el.shadowRoot);
+          visit(el.shadowRoot);
+        }
+      }
+    };
+    visit(document);
+    for (const root of shadowRoots) if (!roots.includes(root)) roots.push(root);
+    return roots;
+  }
+  function queryAll(selector) {
+    const out = [];
+    for (const root of collectShadowRoots()) {
+      try { out.push(...root.querySelectorAll(selector)); } catch (_) {}
+    }
+    return out;
+  }
+
   async function match(fp) {
     const set = new Set(), cssSet = new WeakSet();
     if (fp.cssSelector) queryAll(fp.cssSelector).forEach(el => { set.add(el); cssSet.add(el); });
     if (fp.stableId?.value) queryAll(`#${CSS.escape(fp.stableId.value)}`).forEach(el => set.add(el));
     for (const a of fp.semanticAttributes || []) if (a.valueKind === 'structural') queryAll(`[${CSS.escape(a.name)}="${CSS.escape(a.value)}"]`).forEach(el => set.add(el));
     if (!set.size) queryAll(fp.tagName || '*').slice(0, MAX_CANDIDATES).forEach(el => set.add(el));
-    const ranked = []; for (const el of set) { ranked.push(await score(fp, el, cssSet.has(el))); if (ranked.length >= MAX_CANDIDATES) break; }
+    const ranked = [];
+    for (const el of set) { ranked.push(await score(fp, el, cssSet.has(el))); if (ranked.length >= MAX_CANDIDATES) break; }
     ranked.sort((a, b) => b.totalScore - a.totalScore || b.independent - a.independent);
     const a = ranked[0], b = ranked[1];
     if (!a || a.totalScore < .6) return { status: 'notFound', confidence: a?.totalScore || 0, selected: a };
@@ -139,41 +164,179 @@
   }
 
   const original = new WeakMap();
-  function ensureStyle() { if (document.getElementById(STYLE_ID)) return; const s = document.createElement('style'); s.id = STYLE_ID; s.textContent = `.pb-effect-base{transition:filter 120ms ease}.pb-effect-blur{filter:blur(var(--pb-blur,6px))!important}.pb-effect-strongBlur{filter:blur(var(--pb-strong-blur,16px))!important}.pb-effect-pixelate{filter:blur(8px) contrast(1.8)!important}.pb-effect-blackout{filter:brightness(0)!important;color:transparent!important;text-shadow:none!important}.pb-effect-hide{visibility:hidden!important}.${HIGHLIGHT}{outline:2px solid #00a3ff!important;outline-offset:1px!important;cursor:crosshair!important}`; (document.head || document.documentElement).appendChild(s); }
-  function apply(el, rule) { ensureStyle(); if (!original.has(el)) original.set(el, { className: el.className, blur: el.style.getPropertyValue('--pb-blur'), strong: el.style.getPropertyValue('--pb-strong-blur') }); const px = Math.max(0, Math.min(100, Number(rule.intensity ?? 60))); el.classList.add('pb-effect-base', `pb-effect-${rule.effect}`); el.style.setProperty('--pb-blur', `${Math.max(1, Math.round(px / 100 * 12))}px`); el.style.setProperty('--pb-strong-blur', `${Math.max(4, Math.round(px / 100 * 28))}px`); el.setAttribute(ATTR, rule.ruleId); }
-  function removeRule(id) { queryAll(`[${ATTR}]`).forEach(el => { if (el.getAttribute(ATTR) !== id) return; const o = original.get(el); if (o) { el.className = o.className; if (o.blur) el.style.setProperty('--pb-blur', o.blur); else el.style.removeProperty('--pb-blur'); if (o.strong) el.style.setProperty('--pb-strong-blur', o.strong); else el.style.removeProperty('--pb-strong-blur'); original.delete(el); } else { el.removeAttribute(ATTR); ['pb-effect-base','pb-effect-blur','pb-effect-strongBlur','pb-effect-pixelate','pb-effect-blackout','pb-effect-hide'].forEach(c => el.classList.remove(c)); } el.removeAttribute(ATTR); }); }
-  function removeAll() { queryAll(`[${ATTR}]`).forEach(el => { const o = original.get(el); if (o) { el.className = o.className; if (o.blur) el.style.setProperty('--pb-blur', o.blur); else el.style.removeProperty('--pb-blur'); if (o.strong) el.style.setProperty('--pb-strong-blur', o.strong); else el.style.removeProperty('--pb-strong-blur'); original.delete(el); } el.removeAttribute(ATTR); }); }
+  function ensureStyle() {
+    if (document.getElementById(STYLE_ID)) return;
+    const s = document.createElement('style'); s.id = STYLE_ID;
+    s.textContent = `.pb-effect-base{transition:filter 120ms ease}.pb-effect-blur{filter:blur(var(--pb-blur,6px))!important}.pb-effect-strongBlur{filter:blur(var(--pb-strong-blur,16px))!important}.pb-effect-pixelate{filter:blur(8px) contrast(1.8)!important}.pb-effect-blackout{filter:brightness(0)!important;color:transparent!important;text-shadow:none!important}.pb-effect-hide{visibility:hidden!important}.${HIGHLIGHT}{outline:2px solid #00a3ff!important;outline-offset:1px!important;cursor:crosshair!important}`;
+    (document.head || document.documentElement).appendChild(s);
+  }
+  function apply(el, rule) {
+    ensureStyle();
+    if (!original.has(el)) original.set(el, { className: el.className, blur: el.style.getPropertyValue('--pb-blur'), strong: el.style.getPropertyValue('--pb-strong-blur') });
+    const px = Math.max(0, Math.min(100, Number(rule.intensity ?? 60)));
+    el.classList.add('pb-effect-base', `pb-effect-${rule.effect}`);
+    el.style.setProperty('--pb-blur', `${Math.max(1, Math.round(px / 100 * 12))}px`);
+    el.style.setProperty('--pb-strong-blur', `${Math.max(4, Math.round(px / 100 * 28))}px`);
+    el.setAttribute(ATTR, rule.ruleId);
+  }
+  function removeRule(id) {
+    queryAll(`[${ATTR}]`).forEach(el => {
+      if (el.getAttribute(ATTR) !== id) return;
+      const o = original.get(el);
+      if (o) {
+        el.className = o.className;
+        if (o.blur) el.style.setProperty('--pb-blur', o.blur); else el.style.removeProperty('--pb-blur');
+        if (o.strong) el.style.setProperty('--pb-strong-blur', o.strong); else el.style.removeProperty('--pb-strong-blur');
+        original.delete(el);
+      } else {
+        ['pb-effect-base','pb-effect-blur','pb-effect-strongBlur','pb-effect-pixelate','pb-effect-blackout','pb-effect-hide'].forEach(c => el.classList.remove(c));
+      }
+      el.removeAttribute(ATTR);
+    });
+  }
+  function removeAll() {
+    queryAll(`[${ATTR}]`).forEach(el => {
+      const o = original.get(el);
+      if (o) {
+        el.className = o.className;
+        if (o.blur) el.style.setProperty('--pb-blur', o.blur); else el.style.removeProperty('--pb-blur');
+        if (o.strong) el.style.setProperty('--pb-strong-blur', o.strong); else el.style.removeProperty('--pb-strong-blur');
+        original.delete(el);
+      }
+      el.removeAttribute(ATTR);
+    });
+  }
 
-  let selection = false, hover = null, retryTimer = null, retryCounts = new Map(), evaluating = false;
-  function stopSelection() { selection = false; document.removeEventListener('mousemove', onMove, true); document.removeEventListener('click', onClick, true); document.removeEventListener('keydown', onKey, true); if (hover) hover.classList.remove(HIGHLIGHT); hover = null; }
+  let selection = false, hover = null, retryTimer = null, evaluating = false;
+  const retryCounts = new Map();
+  const pageSuppressed = new Set();
+
+  function stopSelection() {
+    selection = false;
+    document.removeEventListener('mousemove', onMove, true);
+    document.removeEventListener('click', onClick, true);
+    document.removeEventListener('keydown', onKey, true);
+    if (hover) hover.classList.remove(HIGHLIGHT);
+    hover = null;
+  }
   function target(t) { if (!(t instanceof Element) || t.id === STYLE_ID || t.closest('[data-progettoblur-ui="true"]')) return null; return t; }
-  function onMove(e) { const t = target(e.target); if (!t) return; if (hover) hover.classList.remove(HIGHLIGHT); hover = t; hover.classList.add(HIGHLIGHT); }
-  async function onClick(e) { const t = target(e.target); if (!t) return; e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); stopSelection(); const c = context(), now = new Date().toISOString(); const rule = { ruleId: `rule-${crypto.randomUUID()}`, scope: 'page', domain: c.domain, path: c.path, url: location.href, enabled: true, status: 'active', effect: 'blur', intensity: 60, createdAt: now, updatedAt: now, fingerprint: await fingerprint(t) }; await saveRule(rule); apply(t, rule); }
+  function onMove(e) {
+    const t = target(e.target); if (!t) return;
+    if (hover) hover.classList.remove(HIGHLIGHT);
+    hover = t; hover.classList.add(HIGHLIGHT);
+  }
+  async function onClick(e) {
+    const t = target(e.target); if (!t) return;
+    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); stopSelection();
+    const c = context(), now = new Date().toISOString();
+    const rule = { ruleId: `rule-${crypto.randomUUID()}`, scope: 'page', domain: c.domain, path: c.path, url: location.href, enabled: true, status: 'active', effect: 'blur', intensity: 60, createdAt: now, updatedAt: now, fingerprint: await fingerprint(t) };
+    pageSuppressed.delete(rule.ruleId);
+    await saveRule(rule); apply(t, rule);
+  }
   function onKey(e) { if (e.key === 'Escape') stopSelection(); }
   function startSelection() { stopSelection(); selection = true; document.addEventListener('mousemove', onMove, true); document.addEventListener('click', onClick, true); document.addEventListener('keydown', onKey, true); }
 
-  async function evaluateRule(rule) { if (!rule.enabled || !(await getSettings()).extensionEnabled) { removeRule(rule.ruleId); return; } const result = await match(rule.fingerprint); removeRule(rule.ruleId); if (result.status === 'active' && result.selected?.element) apply(result.selected.element, rule); await updateRule({ ...rule, status: result.status, lastConfidence: result.confidence, statusContext: { domain: context().domain, path: context().path, evaluatedAt: new Date().toISOString() }, lastMatchedAt: result.status === 'active' ? new Date().toISOString() : rule.lastMatchedAt }); return result; }
-  async function evaluateAll() { if (evaluating) return; evaluating = true; try { const rules = await getRules(); const pending = []; for (const r of rules) { const result = await evaluateRule(r); if (r.enabled && (result.status === 'notFound' || result.status === 'ambiguous')) pending.push(r.ruleId); } if (pending.length) schedule(pending); } finally { evaluating = false; } }
-  function schedule(ids) { clearTimeout(retryTimer); retryTimer = setTimeout(async () => { const next = []; for (const id of ids) { const n = retryCounts.get(id) || 0; if (n >= MAX_RETRIES) continue; retryCounts.set(id, n + 1); const r = await getRule(id); if (!r || !r.enabled) continue; const result = await evaluateRule(r); if (result.status !== 'active') next.push(id); } if (next.length) schedule(next); }, RETRY_MS); }
+  async function evaluateRule(rule) {
+    if (!rule.enabled || !(await getSettings()).extensionEnabled) { removeRule(rule.ruleId); return { status: 'disabled', confidence: 0 }; }
+    if (pageSuppressed.has(rule.ruleId)) { removeRule(rule.ruleId); return { status: 'suppressed', confidence: 0 }; }
+    const result = await match(rule.fingerprint);
+    removeRule(rule.ruleId);
+    if (result.status === 'active' && result.selected?.element) apply(result.selected.element, rule);
+    await updateRule({ ...rule, status: result.status, lastConfidence: result.confidence, statusContext: { domain: context().domain, path: context().path, evaluatedAt: new Date().toISOString() }, lastMatchedAt: result.status === 'active' ? new Date().toISOString() : rule.lastMatchedAt });
+    return result;
+  }
+  async function evaluateAll() {
+    if (evaluating) return;
+    evaluating = true;
+    try {
+      const rules = await getRules();
+      const pending = [];
+      for (const r of rules) {
+        const result = await evaluateRule(r);
+        if (r.enabled && !pageSuppressed.has(r.ruleId) && (result.status === 'notFound' || result.status === 'ambiguous')) pending.push(r.ruleId);
+      }
+      if (pending.length) schedule(pending);
+    } finally { evaluating = false; }
+  }
+  function schedule(ids) {
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(async () => {
+      const next = [];
+      for (const id of ids) {
+        if (pageSuppressed.has(id)) continue;
+        const n = retryCounts.get(id) || 0;
+        if (n >= MAX_RETRIES) continue;
+        retryCounts.set(id, n + 1);
+        const r = await getRule(id);
+        if (!r || !r.enabled) continue;
+        const result = await evaluateRule(r);
+        if (result.status !== 'active') next.push(id);
+      }
+      if (next.length) schedule(next);
+    }, RETRY_MS);
+  }
+
+  const observedRoots = new WeakSet();
+  const mutationObservers = new WeakMap();
+  function observeRoot(root) {
+    if (!root || observedRoots.has(root)) return;
+    const observer = new MutationObserver(() => {
+      if (!evaluating) { clearTimeout(retryTimer); retryTimer = setTimeout(evaluateAll, RETRY_MS); }
+      // New hosts can introduce open shadow roots; collect them on the next pass.
+      collectShadowRoots();
+    });
+    observer.observe(root, { childList: true, subtree: true, attributes: true });
+    observedRoots.add(root); mutationObservers.set(root, observer);
+  }
+  function observeAllRoots() { observeRoot(document.documentElement); for (const root of shadowRoots) observeRoot(root); }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => { (async () => {
     switch (message?.type) {
       case 'BG_ENTER_SELECTION': startSelection(); break;
       case 'BG_EXIT_SELECTION': stopSelection(); break;
-      case 'BG_REMOVE_RULE_EFFECT_PAGE': removeRule(message.ruleId); break;
-      case 'BG_REMOVE_ALL_EFFECTS_PAGE': removeAll(); break;
-      case 'BG_RETRY_RULE_ON_PAGE': { const r = await getRule(message.ruleId); if (r) await evaluateRule(r); break; }
-      case 'POPUP_DISABLE_RULE': { const r = await getRule(message.ruleId); if (r) { r.enabled = false; r.status = 'disabled'; await updateRule(r); removeRule(r.ruleId); } break; }
-      case 'POPUP_ENABLE_RULE': { const r = await getRule(message.ruleId); if (r) { r.enabled = true; await updateRule(r); await evaluateRule(r); } break; }
-      case 'POPUP_DELETE_RULE': removeRule(message.ruleId); await deleteRule(message.ruleId); break;
+      case 'BG_REMOVE_RULE_EFFECT_PAGE': pageSuppressed.add(message.ruleId); retryCounts.delete(message.ruleId); removeRule(message.ruleId); break;
+      case 'BG_REMOVE_ALL_EFFECTS_PAGE': {
+        const rules = await getRules(); rules.forEach(r => pageSuppressed.add(r.ruleId)); retryCounts.clear(); removeAll(); break;
+      }
+      case 'BG_RETRY_RULE_ON_PAGE': { pageSuppressed.delete(message.ruleId); retryCounts.delete(message.ruleId); const r = await getRule(message.ruleId); if (r) await evaluateRule(r); break; }
+      case 'POPUP_DISABLE_RULE': { const r = await getRule(message.ruleId); if (r) { r.enabled = false; r.status = 'disabled'; pageSuppressed.delete(r.ruleId); await updateRule(r); removeRule(r.ruleId); } break; }
+      case 'POPUP_ENABLE_RULE': { const r = await getRule(message.ruleId); if (r) { r.enabled = true; pageSuppressed.delete(r.ruleId); retryCounts.delete(r.ruleId); await updateRule(r); await evaluateRule(r); } break; }
+      case 'POPUP_DELETE_RULE': pageSuppressed.delete(message.ruleId); retryCounts.delete(message.ruleId); removeRule(message.ruleId); await deleteRule(message.ruleId); break;
       case 'CONTENT_GET_STATE': { const settings = await getSettings(); sendResponse({ ok: true, extensionEnabled: settings.extensionEnabled !== false, selectionActive: selection, rules: await getRules() }); return; }
       default: break;
     }
     sendResponse({ ok: true });
   })().catch(err => sendResponse({ ok: false, error: String(err?.message || err) })); return true; });
 
-  const observer = new MutationObserver(() => { if (!evaluating) { clearTimeout(retryTimer); retryTimer = setTimeout(evaluateAll, RETRY_MS); } });
-  if (document.documentElement) observer.observe(document.documentElement, { childList: true, subtree: true });
-  chrome.storage.onChanged.addListener(changes => { if (changes[SETTINGS_KEY] || Object.keys(changes).some(k => k.startsWith(RULE_PREFIX) || k.startsWith('idx:'))) evaluateAll(); });
+  function installSpaHooks() {
+    for (const name of ['pushState', 'replaceState']) {
+      const originalFn = history[name];
+      if (originalFn.__progettoBlurWrapped) continue;
+      const wrapped = function (...args) {
+        const before = location.href;
+        const result = originalFn.apply(this, args);
+        if (location.href !== before) {
+          retryCounts.clear();
+          pageSuppressed.clear();
+          clearTimeout(retryTimer);
+          retryTimer = setTimeout(evaluateAll, RETRY_MS);
+        }
+        return result;
+      };
+      Object.defineProperty(wrapped, '__progettoBlurWrapped', { value: true });
+      history[name] = wrapped;
+    }
+    addEventListener('popstate', () => { retryCounts.clear(); pageSuppressed.clear(); clearTimeout(retryTimer); retryTimer = setTimeout(evaluateAll, RETRY_MS); }, true);
+  }
+
+  installSpaHooks();
+  collectShadowRoots();
+  observeAllRoots();
+  chrome.storage.onChanged.addListener(changes => {
+    if (changes[SETTINGS_KEY] || Object.keys(changes).some(k => k.startsWith(RULE_PREFIX) || k.startsWith('idx:'))) {
+      // A persistent storage change must re-evaluate, but a page-only suppression remains local until reload.
+      clearTimeout(retryTimer); retryTimer = setTimeout(evaluateAll, RETRY_MS);
+    }
+  });
   evaluateAll();
 })();
