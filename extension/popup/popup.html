@@ -8,12 +8,34 @@
 </head>
 <body>
   <main>
-    <h1>progettoBlur</h1>
-    <label class="toggle"><input id="enabled" type="checkbox"><span>Estensione attiva</span></label>
-    <button id="select">Seleziona elemento</button>
-    <button id="removeAll">Rimuovi blur dalla pagina</button>
-    <div id="rules"></div>
-    <p id="status"></p>
+    <header class="header">
+      <div>
+        <h1>progettoBlur</h1>
+        <p class="subtitle">Gestione degli elementi oscurati</p>
+      </div>
+      <button id="close" class="icon-button" type="button" title="Chiudi">×</button>
+    </header>
+
+    <section class="toolbar">
+      <label class="toggle">
+        <input id="enabled" type="checkbox">
+        <span>Estensione attiva</span>
+      </label>
+      <button id="select" class="primary" type="button">Seleziona elemento</button>
+      <button id="removeAll" class="secondary" type="button">Togli tutti gli effetti dalla pagina</button>
+      <p class="hint">“Togli” è temporaneo: le regole restano salvate e torneranno dopo un nuovo caricamento. Per rimuovere una regola definitivamente usa “Elimina regola”.</p>
+    </section>
+
+    <section class="rules-section">
+      <div class="section-title">
+        <h2>Regole di questa pagina</h2>
+        <span id="ruleCount" class="count">0</span>
+      </div>
+      <div id="rules"></div>
+      <p id="empty" class="empty">Nessuna regola salvata per questa pagina.</p>
+    </section>
+
+    <p id="status" class="status" role="status"></p>
   </main>
   <script src="popup.js"></script>
 </body>
