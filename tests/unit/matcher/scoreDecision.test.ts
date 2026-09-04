@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { decideMatch } from '../../../src/core/matcher/decisionEngine.js';
 import { rankCandidates } from '../../../src/core/matcher/scoreEngine.js';
+import type { CandidateSnapshot } from '../../../src/core/matcher/scoringTypes.js';
 import { sampleRule } from '../helpers/sampleRule.js';
 
 const MIN_CATEGORY_CONTRIBUTION = 0.65;
@@ -56,7 +57,7 @@ describe('score + decision engine', () => {
   it('is ambiguous when top two candidates are too close even above threshold', () => {
     const rule = sampleRule();
 
-    const candidates = [
+    const candidates: CandidateSnapshot[] = [
       {
         candidateId: 'a',
         tagName: 'section',
