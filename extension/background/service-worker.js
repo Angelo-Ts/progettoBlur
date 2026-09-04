@@ -1,6 +1,7 @@
 (() => {
   'use strict';
   const SETTINGS_KEY = 'pb:settings';
+  const CONTENT_SCRIPT = 'content/content-script.js';
   const map = {
     POPUP_GET_STATE: 'CONTENT_GET_STATE',
     POPUP_START_SELECTION: 'BG_ENTER_SELECTION',
@@ -17,6 +18,22 @@
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     return tabs[0];
   }
+  async function sendToContent(tabId, message) {
+    try {
+      return await chrome.tabs.sendMessage(tabId, message);
+    } catch (firstError) {
+      try {
+        await chrome.scripting.executeScript({ target: { tabId }, files: [CONTENT_SCRIPT] });
+        return await chrome.tabs.sendMessage(tabId, message);
+      } catch (injectError) {
+        const text = String(injectError?.message || firstError?.message || injectError);
+        if (/cannot access contents|extensions gallery|chrome:\/\/|edge:\/\//i.test(text)) {
+          throw new Error('Questa pagina non permette a progettoBlur di accedere al contenuto. Prova su una normale pagina web (http/https).');
+        }
+        throw injectError;
+      }
+    }
+  }
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       if (!message?.type) return sendResponse({ ok: false, error: 'missing-message-type' });
@@ -27,7 +44,7 @@
       const tab = sender.tab || await activeTab();
       if (!tab?.id) return sendResponse({ ok: false, error: 'no-active-tab' });
       const type = map[message.type] || message.type;
-      const response = await chrome.tabs.sendMessage(tab.id, { ...message, type });
+      const response = await sendToContent(tab.id, { ...message, type });
       sendResponse(response || { ok: true });
     })().catch(error => sendResponse({ ok: false, error: String(error?.message || error) }));
     return true;
