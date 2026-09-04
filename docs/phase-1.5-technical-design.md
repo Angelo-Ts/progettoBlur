@@ -4,7 +4,7 @@
 Phase 1.5 defines a concrete, safety-first architecture for persistent element obscuring in Chromium/Edge Manifest V3.
 
 Primary invariant:
-- A saved rule must re-apply after refresh and browser restart until explicit user action changes/removes behavior.
+- A saved rule re-applies after refresh and browser restart until explicit user action changes/removes behavior.
 
 Safety invariant:
 - False positives are unacceptable.
@@ -40,8 +40,8 @@ Safety invariant:
         settings.ts
         states.ts
       matcher/
+        categories.ts
         candidateDiscovery.ts
-        signalExtractors.ts
         scoreEngine.ts
         decisionEngine.ts
         dynamicSignalFilter.ts
@@ -81,15 +81,11 @@ Safety invariant:
       scenarios/
 ```
 
-Notes:
-- Matcher and renderer are separate modules.
-- Storage and indexing are isolated from matching logic.
-
 ---
 
 ## 2) Exact schemas (Rule / Fingerprint / Settings)
 
-## 2.1 Rule schema
+### 2.1 Rule schema
 
 ```ts
 Rule {
@@ -98,10 +94,18 @@ Rule {
 
   domain: string;                     // normalized host, no protocol
   path?: string;                      // normalized path for page scope
-  url?: string;                       // optional canonical full URL snapshot
+  url?: string;                       // optional canonical URL snapshot
 
-  enabled: boolean;                   // true unless explicitly disabled
+  enabled: boolean;                   // persistent eligibility gate
+
+  // Current runtime state in the CURRENT evaluated page context.
+  // It is not permanent validity of the rule.
   status: 'active' | 'ambiguous' | 'notFound' | 'disabled';
+  statusContext?: {
+    domain: string;
+    path?: string;
+    evaluatedAt: string;
+  };
 
   effect: 'blur' | 'strongBlur' | 'pixelate' | 'blackout' | 'hide';
   intensity: number;                  // 0..100
@@ -121,45 +125,49 @@ Rule {
 }
 ```
 
-## 2.2 Fingerprint schema
+### 2.2 Fingerprint schema
 
 ```ts
 Fingerprint {
-  generatedAt: string;                // ISO timestamp
+  generatedAt: string;
   generationVersion: '1.5';
 
-  // Fast path only (never sufficient alone)
+  // Fast path only, never sufficient alone for auto-apply
   cssSelector?: string;
 
   stableId?: {
     value: string;
-    confidenceHint: number;           // 0..1
+    confidenceHint: number;
   };
 
+  // Conservative persistence: no raw text-like values.
+  // valueKind='structural' is allowed only for strict whitelist (e.g. role/type)
+  // otherwise valueKind='hash' with SHA-256.
   semanticAttributes: Array<{
-    name: string;                     // data-*, aria-*, name, role, type, href, etc.
-    valueHash?: string;               // SHA-256 where privacy-sensitive
-    rawValue?: string;                // only when non-sensitive + stable
-    stabilityHint: number;            // 0..1
+    name: string;
+    valueKind: 'hash' | 'structural';
+    value: string;
+    stabilityHint: number;
   }>;
 
   stableClasses: Array<{
     className: string;
-    stabilityHint: number;            // 0..1
+    stabilityHint: number;
   }>;
 
+  // Page text remains hash-only.
   normalizedTextHash?: {
     algorithm: 'SHA-256';
     hash: string;
-    sourceLength: number;             // pre-truncation length
-    truncatedLength: number;          // hashed normalized prefix length
-    stable: boolean;                  // false => excluded from scoring
+    sourceLength: number;
+    truncatedLength: number;
+    stable: boolean;
   };
 
   ancestorContext: {
     chain: Array<{
       tag: string;
-      semanticAttrs: Array<{ name: string; valueHash?: string; rawValue?: string }>;
+      semanticAttrs: Array<{ name: string; valueKind: 'hash' | 'structural'; value: string }>;
       stableClasses: string[];
     }>;
     depthCaptured: number;
@@ -178,10 +186,10 @@ Fingerprint {
   };
 
   geometricHint?: {
-    viewportXRatio: number;           // 0..1
-    viewportYRatio: number;           // 0..1
-    widthRatio: number;               // 0..1
-    heightRatio: number;              // 0..1
+    viewportXRatio: number;
+    viewportYRatio: number;
+    widthRatio: number;
+    heightRatio: number;
   };
 
   tagName: string;
@@ -194,13 +202,13 @@ Fingerprint {
 }
 ```
 
-## 2.3 Settings schema
+### 2.3 Settings schema
 
 ```ts
 ExtensionSettings {
   extensionEnabled: boolean;
   defaultEffect: 'blur' | 'strongBlur' | 'pixelate' | 'blackout' | 'hide';
-  defaultIntensity: number;           // 0..100
+  defaultIntensity: number;
   defaultScope: 'page' | 'site';
 
   selectionMode: {
@@ -213,12 +221,13 @@ ExtensionSettings {
     ambiguousThreshold: 0.60;
     topGapAmbiguousDelta: 0.05;
     minIndependentCategories: 3;
+    minCategoryContribution: 0.65;
   };
 
   retryPolicy: {
     mutationDebounceMs: 150;
     inactivityWindowMs: 5000;
-    maxAutoRetryAttemptsPerRulePerLoad: number; // e.g. 5
+    maxAutoRetryAttemptsPerRulePerLoad: number;
   };
 
   ui: {
@@ -231,239 +240,196 @@ ExtensionSettings {
 
 ## 3) Matcher scoring algorithm and decision matrix
 
-## 3.1 Candidate generation
-1. Resolve rule scope filter first (domain/page index).
-2. Use `cssSelector` as fast candidate seed only.
-3. Expand candidate set via stable signals (id, semantic attributes, ancestor anchors).
-4. Include open Shadow DOM traversal candidates when available.
-5. Exclude cross-origin iframe internals.
+### 3.1 Deterministic candidate set and ranking
+For each rule in scope, produce candidate set `Cand = {c1...cn}` deterministically from:
+1. CSS fast-path hits.
+2. Stable-id/semantic-attribute anchor queries.
+3. Ancestor-anchored structural expansion.
+4. Open Shadow DOM traversal.
 
-## 3.2 Dynamic signal filtering
-Treat likely dynamic tokens as non-stable and remove from scoring input:
-- IDs/classes with long hash-like segments, timestamp-like suffixes, random GUID patterns, build-chunk markers.
-- Volatile text (rapidly changing counters, clocks, dynamic notification numbers).
+Each candidate gets a deterministic `candidateId` (stable DOM path key). Candidates are sorted deterministically after scoring by:
+1. `totalScore` desc,
+2. `independentContributions` desc,
+3. `semanticAttributesScore` desc,
+4. `candidateId` lexicographic asc.
 
-## 3.3 Weighted independent categories
-Scoring is computed by category (0..1 each), then weighted sum, with category independence checks.
+`C1` = first candidate in sorted list, `C2` = second candidate if present.
 
-Recommended category weights:
-- stable ID: **0.26** (high)
-- semantic attributes: **0.22** (high)
-- normalized text hash (stable only): **0.14** (medium/high)
-- stable classes: **0.12** (medium)
-- ancestor context: **0.10** (medium)
-- structure/siblings: **0.08** (medium)
-- css selector exactness: **0.04** (fast path support only)
-- dimensions/position: **0.02** (low)
-- tag name: **0.02** (low)
+### 3.2 Categories and weights
+Categories and fixed weights `w_k`:
+- stableId: 0.26
+- semanticAttributes: 0.22
+- textHash: 0.14
+- stableClasses: 0.12
+- ancestorContext: 0.10
+- structureContext: 0.08
+- cssSelector: 0.04
+- geometry: 0.02
+- tagName: 0.02
 
-Total = 1.00
+### 3.3 Category score computation (mathematical)
+Each category score is `s_k(c) ∈ [0,1]`.
 
-Independent category counting for auto-apply includes only:
-- stable ID
-- semantic attributes
-- text hash
-- stable classes
-- ancestor context
-- structure/siblings
+- **stableId**: `1` if exact id match, else `0`.
+- **semanticAttributes**:
+  - Let fingerprint attrs be `A`.
+  - For each `a∈A`, `m(a)=1` if same `(name,valueKind,value)` exists in candidate, else `0`.
+  - `s_sem = Σ(stabilityHint(a)*m(a)) / Σ(stabilityHint(a))`.
+- **textHash**: `1` if stable text hash equals candidate hash, else `0`.
+- **stableClasses**: Jaccard `|F∩C|/|F∪C|`.
+- **ancestorContext**:
+  - Compare aligned ancestor nodes.
+  - Per-node score: `0.5*tagMatch + 0.3*attrJaccard + 0.2*classJaccard`.
+  - Category score = mean of node scores.
+- **structureContext**: mean of available sibling/child signature checks.
+- **cssSelector**: `1` if candidate reached via exact selector fast-path, else `0`.
+- **geometry**: `1 - mean(abs(delta ratios))`, clipped to `[0,1]`.
+- **tagName**: `1` on exact tag match, else `0`.
 
-(`cssSelector`, geometry, tag are excluded from the independence minimum.)
+### 3.4 Missing category handling and weight renormalization
+If a category is unavailable (missing fingerprint signal or missing candidate signal), it is excluded from denominator.
 
-## 3.4 Decision matrix
-For the best candidate `C1` and second best `C2`:
+Let `K_avail(c)` be available categories for candidate `c`.
 
-1. If no candidate reaches `0.60` => `notFound`.
+`score(c) = (Σ_{k∈K_avail(c)} w_k * s_k(c)) / (Σ_{k∈K_avail(c)} w_k)`
+
+If `K_avail(c)=∅`, score is `0`.
+
+### 3.5 Independent categories (formalized 6 categories)
+Independent category set (used for `minIndependentCategories=3`):
+1. stableId
+2. semanticAttributes
+3. textHash
+4. stableClasses
+5. ancestorContext
+6. structureContext
+
+Rule: multiple signals inside the same category count as **one** category.
+A category contributes to independent count only if:
+- category is available, and
+- `s_k(c) >= minCategoryContribution` (default `0.65`).
+
+`independentContributions(c) = count(eligible categories in the 6-category set)`
+
+### 3.6 Decision matrix
+Given `C1`, `C2`:
+1. If no candidate or `score(C1) < 0.60` => `notFound`.
 2. If `0.60 <= score(C1) < 0.85` => `ambiguous`.
-3. If `score(C1) >= 0.85` but independent categories < 3 => `ambiguous`.
-4. If `score(C1) >= 0.85` and `score(C1)-score(C2) <= 0.05` => `ambiguous`.
-5. Else => `active` and auto-apply.
+3. If `score(C1) >= 0.85` and `independentContributions(C1) < 3` => `ambiguous`.
+4. If `score(C1) >= 0.85` and `|score(C1)-score(C2)| <= 0.05` => `ambiguous`.
+5. Else => `active` (auto-apply).
 
-Never auto-apply in `ambiguous` or `notFound`.
-Persist confidence and resulting status.
+Ambiguous/notFound are never auto-applied.
+CSS selector alone never authorizes auto-apply.
 
 ---
 
 ## 4) Flow: Selection → Fingerprint → Storage → Apply
-
-1. User enables selection mode in popup.
-2. Content script highlights hovered element (non-destructive overlay).
-3. On click:
-   - prevent page action when possible,
-   - collect stable signals,
-   - generate `fingerprint` in one operation.
-4. Normalize/sanitize text; store only SHA-256 hash for text signal.
-5. Build `Rule` with selected scope/effect/intensity, status=`active`, enabled=`true`.
-6. Persist in `chrome.storage.local` plus scope indexes.
-7. Immediate local match validation on selected element.
-8. Apply renderer effect and mark with `data-progettoblur-rule-id`.
-9. Notify popup with updated rule/state.
-
-Fallback behavior:
-- If fingerprint lacks enough stable signals at creation time, save rule as `ambiguous` and require manual retry/pick.
+1. User enables selection mode.
+2. Content script highlights hovered element.
+3. On click: collect snapshot and generate fingerprint in one operation.
+4. Apply conservative sanitization:
+   - text => SHA-256 hash only,
+   - potentially sensitive/user-specific attributes => hash,
+   - structural whitelist only for safe non-sensitive values.
+5. Create Rule (`enabled=true`, initial `status` with current page context).
+6. Persist to `chrome.storage.local` + domain/path indexes.
+7. Validate match locally and apply effect only if safe.
+8. Notify popup of rule state.
 
 ---
 
 ## 5) Flow: Page Load → Load Rules → Match → Apply
-
-1. On content script init (document_idle + SPA route events), request applicable rule IDs by domain/path index.
-2. Load only relevant rules (avoid full scan).
-3. For each enabled rule:
-   - run matcher,
-   - compute score and decision.
-4. If decision=`active`: apply effect, update `lastMatchedAt/lastConfidence/status`.
-5. If `ambiguous` or `notFound`: persist status unchanged and show in popup list.
-6. Disabled rules are loaded for display but never matched/applied.
-
-Safety fallback:
-- Any uncertainty routes to `ambiguous`/`notFound`, never forced rendering.
+1. On load/route change, resolve current domain/path.
+2. Load indexed rules only (site+page scope).
+3. For each enabled rule: score candidates deterministically.
+4. Apply only when decision is `active`.
+5. Persist runtime `status` as current-page result (`statusContext`).
+6. Keep `ambiguous/notFound` persisted for visibility and Retry.
+7. `disabled` rules are not matched/applied.
 
 ---
 
-## 6) MutationObserver strategy (SPA + dynamic DOM)
-
-- One observer per same-origin document/root.
-- Observe: `childList`, `subtree`, limited `attributes` (id/class/role/aria/data*/name/type/href).
-- Debounce processing: ~150ms.
-- Incremental processing only for changed subtrees.
-- Priority queue:
-  1) `notFound` rules first,
-  2) then `ambiguous` only on manual Retry,
-  3) skip `disabled`.
-- Auto-retry constraints for `notFound`:
-  - max attempts per rule per page load,
-  - stop after ~5s inactivity window,
-  - no infinite loops.
-- Manual Retry command always available and bypasses inactivity lock for one explicit pass.
-
-SPA navigation handling:
-- Hook `history.pushState`, `replaceState`, `popstate`, and URL change detection.
-- On route change, reset per-load retry counters and rerun indexed matching.
+## 6) MutationObserver strategy
+- Incremental observer with debounce ~150ms.
+- No full rematch per mutation.
+- Prioritize `notFound` rules for limited auto-retry.
+- Stop auto-retry after inactivity window (~5s) or max attempts.
+- Manual Retry always available.
+- Handle SPA navigation (pushState/replaceState/popstate/url change).
 
 ---
 
 ## 7) Messaging design (popup/content/service worker)
+- Popup → SW: enable/disable, selection mode, retry, remove blur (page-only), disable rule, delete rule, list rules.
+- SW → Content: enter/exit selection, apply rules, retry specific rule, remove rendered effects page-only.
+- Content → SW: selection captured, match result, route changed, state update.
+- SW → Popup: updated rules/states/errors.
 
-Message channels (typed contract):
-
-- Popup → Service Worker
-  - `SET_EXTENSION_ENABLED`
-  - `SET_SELECTION_MODE`
-  - `CREATE_RULE_FROM_SELECTION_REQUEST`
-  - `UPDATE_RULE_EFFECT`
-  - `RETRY_RULE`
-  - `REMOVE_BLUR_PAGE_ONLY`
-  - `DISABLE_RULE`
-  - `DELETE_RULE`
-  - `GET_RULES_FOR_CURRENT_TAB`
-
-- Service Worker → Content Script
-  - `ENTER_SELECTION_MODE`
-  - `EXIT_SELECTION_MODE`
-  - `APPLY_RULES`
-  - `RETRY_RULE_ON_PAGE`
-  - `REMOVE_BLUR_BY_RULE_ID_PAGE_ONLY`
-  - `REMOVE_ALL_BLURS_PAGE_ONLY`
-
-- Content Script → Service Worker
-  - `SELECTION_CAPTURED`
-  - `RULE_MATCH_RESULT`
-  - `RULE_STATUS_CHANGED`
-  - `PAGE_ROUTE_CHANGED`
-
-- Service Worker → Popup
-  - `RULE_LIST_UPDATED`
-  - `RULE_STATE_UPDATED`
-  - `ERROR_STATE`
-
-Design notes:
-- Service worker is source of truth for persisted state transitions.
-- Content script is source of truth for DOM runtime state.
+SW is source of truth for persisted data. Content script is source of truth for runtime DOM effects.
 
 ---
 
 ## 8) Lifecycle/state handling
-
 States:
-- `active`: rule matched with safe confidence and effect applied.
-- `ambiguous`: candidate confidence insufficient or tie too close; not auto-applied.
-- `notFound`: no candidate above minimum threshold; not auto-applied.
-- `disabled`: user-disabled; retained in storage; no matching/application.
+- active
+- ambiguous
+- notFound
+- disabled
 
-Persistent transitions:
-- create rule: `active` (or `ambiguous` if insufficient stable signals immediately)
-- active -> ambiguous: match confidence dropped/tie rule triggered
-- active -> notFound: no viable candidate
-- ambiguous/notFound -> active: explicit Retry or later deterministic high-confidence match
-- any -> disabled: user Disable
-- disabled -> active/ambiguous/notFound: user Enable then rematch
-- any -> deleted: user Delete (hard remove)
+Semantics:
+- `status` = current matching/application state in current evaluated page context.
+- `enabled` = persistent permission gate for future application.
 
-Operation semantics (distinct):
-- Remove blur: remove rendering from current page only; keep saved rule intact.
-- Disable rule: keep rule, set enabled=false/status=disabled, never auto-apply.
-- Delete rule: remove rule and indexes permanently.
+Operations:
+- Remove blur: remove effect on current page only, keep rule.
+- Disable: keep rule, set enabled=false, status=disabled.
+- Delete: remove rule and indexes permanently.
 
 ---
 
-## 9) Responsibilities per module
-
-- `fingerprintGenerator`: produce one-shot fingerprint at selection time.
-- `stableAttributeFilter` + `dynamicSignalFilter`: remove volatile/dynamic signals.
-- `scoreEngine`: compute weighted per-category confidence.
-- `decisionEngine`: apply thresholds + independence + top-gap tie policy.
-- `ruleRepository`: CRUD rule persistence in `chrome.storage.local`.
-- `indexRepository`: domain/path indexes for scalable loading.
-- `ruleApplier`: apply/remove visual effects for matched elements.
-- `effectRenderer`: implement blur/pixelate/blackout/hide with isolated CSS strategy.
-- `domObserver` + `retryCoordinator`: bounded incremental retry mechanics.
-- `selectionController`: hover highlight + click capture + safe interception.
-- `iframeCoordinator`: same-origin traversal; cross-origin skip.
-- `shadowDomWalker`: open shadow roots traversal only.
-- `messageRouter`: strict message validation and routing.
+## 9) Module responsibilities
+- models: strict types and invariants.
+- fingerprinting: one-shot generation + conservative sanitization.
+- matcher/scoreEngine: deterministic weighted scoring.
+- matcher/decisionEngine: threshold policy and state classification.
+- storage/indexRepository: indexed persistence on chrome.storage.local.
+- retry/observer: bounded automatic retry, no infinite loops.
+- rendering: visual effect application/removal only.
+- messaging: typed contracts between popup/content/SW.
 
 ---
 
 ## 10) Testing strategy (safety-first)
+Unit:
+- category score formulas and deterministic ordering (C1/C2).
+- missing-category renormalization.
+- independent category counting (6-category formal set).
+- thresholds and top-2-gap ambiguity rule.
+- fingerprint privacy: text hash-only and conservative attribute persistence.
+- storage index behavior by domain/path.
 
-## 10.1 Unit tests
-- Score engine per signal category and weight.
-- Decision engine thresholds:
-  - >=0.85 with >=3 categories => auto-apply.
-  - 0.60..0.85 => ambiguous.
-  - <0.60 => notFound.
-  - top-gap <=0.05 => ambiguous.
-- Dynamic-token filtering accuracy.
-- Text normalization/hash behavior (no clear sensitive text persisted).
-- Rule/index repository read/write and partition behavior.
+Integration:
+- selection→fingerprint→persist→match.
+- status vs enabled semantics.
+- remove/disable/delete distinction.
+- bounded MutationObserver retry behavior.
 
-## 10.2 Integration tests
-- Popup ↔ service worker ↔ content messaging contracts.
-- Selection-to-save-to-apply full pipeline.
-- State persistence for active/ambiguous/notFound/disabled.
-- Remove blur vs Disable vs Delete semantics.
-- Retry behavior and bounded auto-retry window.
+E2E:
+- persistence across refresh/restart.
+- dynamic SPA updates.
+- same-origin iframe and open shadow DOM support.
+- cross-origin iframe and closed shadow DOM graceful limits.
 
-## 10.3 E2E tests (Edge/Chromium)
-- Persist across refresh and browser restart.
-- Multi-rule coexistence on same page.
-- SPA route changes (React/Vue/Angular-like fixture).
-- Same-origin iframe matching; cross-origin iframe graceful skip.
-- Open shadow DOM matching; closed shadow DOM documented limitation.
-- Ambiguous candidate scenario ensures no auto-apply.
-
-## 10.4 Safety acceptance gates
-A change fails acceptance if any test shows:
-- auto-application on ambiguous confidence,
-- auto-application with <3 independent categories,
-- auto-application when top-2 candidate gap <=0.05,
-- storage of raw sensitive text from page content.
+Acceptance fails if any uncertain match is auto-applied.
 
 ---
 
-## Technical limits and explicit non-goals
-- Cross-origin iframe internal DOM cannot be manipulated due to browser security policy.
-- Closed Shadow DOM internals are not accessible.
-- Canvas internals are not semantically targetable; only whole canvas element can be obscured.
-- CSS selector alone never authorizes auto-apply.
+## Technical limits
+- Same-origin iframe: supported.
+- Cross-origin iframe internal DOM: not manipulable.
+- Open Shadow DOM: supported when accessible.
+- Closed Shadow DOM: not accessible.
+- Canvas: selectable/obscurable as whole element only.
 
-This design is MV3-compatible and targets Edge/Chromium now, with portability to future Chromium browsers.
+Design is directly compatible with Edge/Chromium MV3 and future Chromium browsers.
