@@ -9,7 +9,9 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "build": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -p tsconfig.json --noEmit",
+    "validate:extension": "node scripts/validate-extension.mjs",
+    "check": "npm run build && npm test && npm run validate:extension"
   },
   "repository": {
     "type": "git",
@@ -18,10 +20,10 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "type": "module",
   "devDependencies": {
     "@types/node": "^26.4.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0"
-  },
-  "type": "module"
+  }
 }
