@@ -67,11 +67,25 @@
     }
   }
 
+  async function deleteAllRules() {
+    const state = await chrome.storage.local.get(null);
+    const keys = Object.keys(state).filter(key => key.startsWith('rule:') || key.startsWith('idx:'));
+    if (keys.length) await chrome.storage.local.remove(keys);
+  }
+
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       if (!message?.type) return sendResponse({ ok: false, error: 'missing-message-type' });
       if (message.type === 'POPUP_SET_EXTENSION_ENABLED') {
         await chrome.storage.local.set({ [SETTINGS_KEY]: { extensionEnabled: Boolean(message.enabled) } });
+        return sendResponse({ ok: true });
+      }
+      if (message.type === 'POPUP_DELETE_ALL_RULES') {
+        const tab = sender.tab || await activeTab();
+        if (tab?.id) {
+          try { await sendToContent(tab.id, { type: 'BG_REMOVE_ALL_EFFECTS_PAGE' }); } catch (_) {}
+        }
+        await deleteAllRules();
         return sendResponse({ ok: true });
       }
       const tab = sender.tab || await activeTab();
