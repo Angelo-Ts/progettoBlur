@@ -86,14 +86,19 @@
   };
   $('select').onclick = async () => {
     const r = await send('POPUP_START_SELECTION');
-    if (r?.ok) {
-      status('Selezione attiva: passa sulla pagina e clicca l’elemento da oscurare. Premi Esc per annullare.');
-    } else status(r?.error || 'Impossibile avviare la selezione.');
+    if (r?.ok) status('Selezione attiva: passa sulla pagina e clicca l’elemento da oscurare. Premi Esc per annullare.');
+    else status(r?.error || 'Impossibile avviare la selezione.');
   };
   $('removeAll').onclick = async () => {
     const r = await send('POPUP_REMOVE_ALL_EFFECTS_PAGE');
     if (r?.ok) { status('Tutti gli effetti sono stati tolti dalla pagina. Le regole restano salvate.'); await refresh(); }
     else status(r?.error || 'Impossibile togliere gli effetti.');
+  };
+  $('deleteAll').onclick = async () => {
+    if (!confirm('Eliminare TUTTE le regole salvate? Questa operazione non può essere annullata.')) return;
+    const r = await send('POPUP_DELETE_ALL_RULES');
+    if (r?.ok) { status('Tutte le regole sono state eliminate.'); await refresh(); }
+    else status(r?.error || 'Impossibile eliminare le regole.');
   };
   refresh();
 })();
