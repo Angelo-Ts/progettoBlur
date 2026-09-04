@@ -2,6 +2,8 @@
   'use strict';
   const SETTINGS_KEY = 'pb:settings';
   const CONTENT_SCRIPT = 'content/content-script.js';
+  let managerWindowId = null;
+
   const map = {
     POPUP_GET_STATE: 'CONTENT_GET_STATE',
     POPUP_START_SELECTION: 'BG_ENTER_SELECTION',
@@ -10,14 +12,44 @@
     POPUP_REMOVE_BLUR_PAGE_ONLY: 'BG_REMOVE_RULE_EFFECT_PAGE',
     POPUP_REMOVE_ALL_EFFECTS_PAGE: 'BG_REMOVE_ALL_EFFECTS_PAGE'
   };
+
   chrome.runtime.onInstalled.addListener(async () => {
     const state = await chrome.storage.local.get({ [SETTINGS_KEY]: null });
     if (!state[SETTINGS_KEY]) await chrome.storage.local.set({ [SETTINGS_KEY]: { extensionEnabled: true } });
   });
+
   async function activeTab() {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     return tabs[0];
   }
+
+  async function openManagerWindow() {
+    if (managerWindowId !== null) {
+      try {
+        await chrome.windows.update(managerWindowId, { focused: true });
+        return;
+      } catch (_) {
+        managerWindowId = null;
+      }
+    }
+    const win = await chrome.windows.create({
+      url: chrome.runtime.getURL('popup/popup.html'),
+      type: 'popup',
+      width: 430,
+      height: 680,
+      focused: true
+    });
+    managerWindowId = win.id ?? null;
+  }
+
+  chrome.action.onClicked.addListener(() => {
+    openManagerWindow().catch(console.error);
+  });
+
+  chrome.windows.onRemoved.addListener(windowId => {
+    if (windowId === managerWindowId) managerWindowId = null;
+  });
+
   async function sendToContent(tabId, message) {
     try {
       return await chrome.tabs.sendMessage(tabId, message);
@@ -34,6 +66,7 @@
       }
     }
   }
+
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       if (!message?.type) return sendResponse({ ok: false, error: 'missing-message-type' });
