@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "progettoBlur",
+  "version": "0.2.0",
+  "description": "Persistently obscure selected page elements with safety-first matching.",
+  "permissions": ["storage", "tabs", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "background": {"service_worker": "background/service-worker.js", "type": "module"},
+  "action": {"default_title": "progettoBlur"},
+  "content_scripts": [{"matches": ["<all_urls>"], "js": ["content/content-script.js"], "run_at": "document_idle", "all_frames": true}]
+}

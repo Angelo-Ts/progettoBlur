@@ -1,0 +1,99 @@
+(() => {
+  'use strict';
+  const SETTINGS_KEY = 'pb:settings';
+  const CONTENT_SCRIPT = 'content/content-script.js';
+  let managerWindowId = null;
+
+  const map = {
+    POPUP_GET_STATE: 'CONTENT_GET_STATE',
+    POPUP_START_SELECTION: 'BG_ENTER_SELECTION',
+    POPUP_STOP_SELECTION: 'BG_EXIT_SELECTION',
+    POPUP_RETRY_RULE: 'BG_RETRY_RULE_ON_PAGE',
+    POPUP_REMOVE_BLUR_PAGE_ONLY: 'BG_REMOVE_RULE_EFFECT_PAGE',
+    POPUP_REMOVE_ALL_EFFECTS_PAGE: 'BG_REMOVE_ALL_EFFECTS_PAGE'
+  };
+
+  chrome.runtime.onInstalled.addListener(async () => {
+    const state = await chrome.storage.local.get({ [SETTINGS_KEY]: null });
+    if (!state[SETTINGS_KEY]) await chrome.storage.local.set({ [SETTINGS_KEY]: { extensionEnabled: true } });
+  });
+
+  async function activeTab() {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tabs[0];
+  }
+
+  async function openManagerWindow() {
+    if (managerWindowId !== null) {
+      try {
+        await chrome.windows.update(managerWindowId, { focused: true });
+        return;
+      } catch (_) {
+        managerWindowId = null;
+      }
+    }
+    const win = await chrome.windows.create({
+      url: chrome.runtime.getURL('popup/popup.html'),
+      type: 'popup',
+      width: 430,
+      height: 680,
+      focused: true
+    });
+    managerWindowId = win.id ?? null;
+  }
+
+  chrome.action.onClicked.addListener(() => {
+    openManagerWindow().catch(console.error);
+  });
+
+  chrome.windows.onRemoved.addListener(windowId => {
+    if (windowId === managerWindowId) managerWindowId = null;
+  });
+
+  async function sendToContent(tabId, message) {
+    try {
+      return await chrome.tabs.sendMessage(tabId, message);
+    } catch (firstError) {
+      try {
+        await chrome.scripting.executeScript({ target: { tabId }, files: [CONTENT_SCRIPT] });
+        return await chrome.tabs.sendMessage(tabId, message);
+      } catch (injectError) {
+        const text = String(injectError?.message || firstError?.message || injectError);
+        if (/cannot access contents|extensions gallery|chrome:\/\/|edge:\/\//i.test(text)) {
+          throw new Error('Questa pagina non permette a progettoBlur di accedere al contenuto. Prova su una normale pagina web (http/https).');
+        }
+        throw injectError;
+      }
+    }
+  }
+
+  async function deleteAllRules() {
+    const state = await chrome.storage.local.get(null);
+    const keys = Object.keys(state).filter(key => key.startsWith('rule:') || key.startsWith('idx:'));
+    if (keys.length) await chrome.storage.local.remove(keys);
+  }
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    (async () => {
+      if (!message?.type) return sendResponse({ ok: false, error: 'missing-message-type' });
+      if (message.type === 'POPUP_SET_EXTENSION_ENABLED') {
+        await chrome.storage.local.set({ [SETTINGS_KEY]: { extensionEnabled: Boolean(message.enabled) } });
+        return sendResponse({ ok: true });
+      }
+      if (message.type === 'POPUP_DELETE_ALL_RULES') {
+        const tab = sender.tab || await activeTab();
+        if (tab?.id) {
+          try { await sendToContent(tab.id, { type: 'BG_REMOVE_ALL_EFFECTS_PAGE' }); } catch (_) {}
+        }
+        await deleteAllRules();
+        return sendResponse({ ok: true });
+      }
+      const tab = sender.tab || await activeTab();
+      if (!tab?.id) return sendResponse({ ok: false, error: 'no-active-tab' });
+      const type = map[message.type] || message.type;
+      const response = await sendToContent(tab.id, { ...message, type });
+      sendResponse(response || { ok: true });
+    })().catch(error => sendResponse({ ok: false, error: String(error?.message || error) }));
+    return true;
+  });
+})();
